@@ -1,4 +1,3 @@
-# Python缓存文件
 __pycache__/
 *.py[cod]
 *$py.class
@@ -20,33 +19,33 @@ var/
 .installed.cfg
 *.egg
 
-# 缓存目录
+
 cache/
 cache_resplit/
 
-# 虚拟环境
+
 venv/
 ENV/
 env/
 
-# IDE配置
+
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# 输出文件
+
 *.json
 *.jsonl
 
-# 日志文件
+
 *.log
 
-# 数据文件夹（根据需要可以取消注释）
+
 data/
 processed_data/
 
-# 敏感信息文件
+
 .env
 credentials.json
 *config.json 
