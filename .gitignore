@@ -43,8 +43,8 @@ env/
 *.log
 
 # 数据文件夹（根据需要可以取消注释）
-# data/
-# processed_data/
+data/
+processed_data/
 
 # 敏感信息文件
 .env
