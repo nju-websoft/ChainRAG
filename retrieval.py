@@ -325,52 +325,112 @@ class QuestionPlanner:
                             llm_counter += 1
                             break
                 
-                # Retrieve initial context for the sub-question
-                top_sentences = self.find_top_k_sentences(modified_sub_q, k=7)
+                # --- New expansion logic starts ---
+
+                # 1. Retrieve initial seed sentences
+                top_k_sentences = self.find_top_k_sentences(modified_sub_q, k=7)
+                context = [sent for _, sent in top_k_sentences]
                 
-                context = [sent for _, sent in top_sentences]
-                context_length_total += len(context)
+                # 2. Add previous context summary
+                if previous_context_summary:
+                    context.append(f"Previous context summary: {previous_context_summary}")
                 
-                # Add previous context if question refers to previous information
-                prev_ans_context = []
-                if previous_context_summary and any(ref in sub_q.lower() for ref in ["previous", "before", "earlier", "last", "first"]):
-                    prev_ans_context = [previous_context_summary]
+                # 3. Initialize
+                processed_sentences = set(context)
+                current_words = sum(len(sent.split()) for sent in context)
+                max_words = 3000
                 
-                # Check if current context is sufficient to answer the question
-                can_answer = self.can_answer_question(modified_sub_q, context + prev_ans_context)
+                # 4. Check if initial seed sentences can answer
+                llm_counter += 1  # can_answer_question call
+                if self.can_answer_question(modified_sub_q, context):
+                    # llm_counter is incremented in force_answer
+                    answer = self.force_answer(modified_sub_q, context)
+                    if "unable" not in answer.lower() and "don't know" not in answer.lower():
+                        previous_answers[modified_sub_q] = answer
+                        sub_results.append({
+                            "sub_question": sub_q,
+                            "modified_sub_question": modified_sub_q,
+                            "context": context,
+                            "answer": answer
+                        })
+                        previous_context_summary = f"For the question '{modified_sub_q}', the answer is: {answer}"
+                        context_length_total += len(processed_sentences) # Accumulate the number of context sentences used
+                        continue
                 
-                # If not, expand context with graph neighbors
-                if not can_answer:
-                    context_length_total += len(prev_ans_context)
-                    extended_context = []
-                    for _, sent in top_sentences[:3]:
-                        neighbors = self.get_n_hop_neighbors(sent, n_hops=1)
-                        extended_context.extend(neighbors)
+                # 5. Get 1-hop neighbors for all seed sentences at once
+                one_hop_neighbors = set()
+                for _, seed_sentence in top_k_sentences:
+                    neighbors = self.get_n_hop_neighbors(seed_sentence, n_hops=1)
+                    one_hop_neighbors.update(neighbors)
+                
+                # Add 1-hop neighbors to context (deduplicated)
+                for neighbor in one_hop_neighbors:
+                    if neighbor not in processed_sentences and current_words < max_words:
+                        context.append(neighbor)
+                        processed_sentences.add(neighbor)
+                        current_words += len(neighbor.split())
+                        if current_words >= max_words:
+                            break
+                
+                # Re-rank and check if it can be answered
+                context = self.sort_context(modified_sub_q, context)
+                llm_counter += 1  # can_answer_question call
+                if self.can_answer_question(modified_sub_q, context):
+                    # llm_counter is incremented in force_answer
+                    answer = self.force_answer(modified_sub_q, context)
+                    if "unable" not in answer.lower() and "don't know" not in answer.lower():
+                        previous_answers[modified_sub_q] = answer
+                        sub_results.append({
+                            "sub_question": sub_q,
+                            "modified_sub_question": modified_sub_q,
+                            "context": context,
+                            "answer": answer
+                        })
+                        previous_context_summary = f"For the question '{modified_sub_q}', the answer is: {answer}"
+                        context_length_total += len(processed_sentences) # Accumulate the number of context sentences used
+                        continue
+                
+                # 6. Get higher-hop neighbors for each seed sentence
+                current_hop = 2
+                max_hops = 3  # Set max hops limit
+                
+                while current_hop <= max_hops and current_words < max_words:
+                    higher_hop_neighbors_set = set() # Collect all neighbors at this hop level
+                    for _, seed_sentence in top_k_sentences:
+                        # Get neighbors at the current hop distance
+                        higher_hop_neighbors = self.get_n_hop_neighbors(seed_sentence, n_hops=current_hop)
+                        higher_hop_neighbors_set.update(higher_hop_neighbors)
                     
-                    if extended_context:
-                        sorted_extended = self.sort_context(modified_sub_q, extended_context)
-                        context.extend(sorted_extended[:5])
-                        context_length_total += 5
+                    # Add new neighbors to context
+                    for neighbor in higher_hop_neighbors_set:
+                        if neighbor not in processed_sentences and current_words < max_words:
+                            context.append(neighbor)
+                            processed_sentences.add(neighbor)
+                            current_words += len(neighbor.split())
+                            if current_words >= max_words:
+                                break
+                    
+                    if current_words >= max_words:
+                        break
+                    
+                    current_hop += 1 # Increment hop count
                 
-                # Generate answer for this sub-question
-                answer = self.force_answer(modified_sub_q, context + prev_ans_context)
-                
-                # Store results for this sub-question
-                sub_result = {
-                    "sub_question": sub_q,
-                    "modified_sub_question": modified_sub_q,
-                    "context": context + prev_ans_context,
-                    "answer": answer
-                }
-                
-                sub_results.append(sub_result)
-                previous_answers[sub_q] = answer
-                
-                # Update context summary for next sub-question
-                if not previous_context_summary:
-                    previous_context_summary = f"For the question '{sub_q}', the answer is: {answer}"
-                else:
-                    previous_context_summary += f" For the question '{sub_q}', the answer is: {answer}"
+                # 7. Force generate answer
+                context = self.sort_context(modified_sub_q, context)
+                if not any(r["sub_question"] == sub_q for r in sub_results):
+                    # llm_counter is incremented in force_answer
+                    answer = self.force_answer(modified_sub_q, context)
+                    previous_answers[modified_sub_q] = answer
+                    sub_results.append({
+                        "sub_question": sub_q,
+                        "modified_sub_question": modified_sub_q,
+                        "context": context,
+                        "answer": answer
+                    })
+                    previous_context_summary = f"For the question '{modified_sub_q}', the answer is: {answer}"
+                    context_length_total += len(processed_sentences) # Accumulate the number of context sentences used
+
+                # --- New expansion logic ends ---
                 
             except Exception as e:
                 print(f"Error processing sub-question: {str(e)}")
@@ -530,27 +590,21 @@ def chain_rag(dataset_name: str, use_cache: bool = True):
         
         start_time = time.time()
         
-        # Reset counter for this question
-        question_llm_counter = 0
-        question_context_length = 0
+        # Reset counters for this question
+        question_llm_counter_start = llm_counter
+        question_context_length_start = context_length_total
         
         try:
             # Build graph and plan for this question
             planner.clear_graph()
             planner.build_graph(context, text_id)
             
-            # Record initial counter
-            initial_llm_counter = llm_counter
-            
             # Execute the multi-hop reasoning process
             result = planner.plan(context, question)
             
             # Calculate statistics for this question
-            question_llm_counter = llm_counter - initial_llm_counter
-            
-            # Calculate context length
-            for sub_result in result["sub_results"]:
-                question_context_length += len(sub_result["context"])
+            question_llm_counter = llm_counter - question_llm_counter_start
+            question_context_length = context_length_total - question_context_length_start
             
             end_time = time.time()
             question_processing_time = end_time - start_time
@@ -573,7 +627,7 @@ def chain_rag(dataset_name: str, use_cache: bool = True):
                 "answer_with_subquestions": result["final_answer_with_subquestions"],
                 "answer_without_subquestions": result["final_answer_without_subquestions"],
                 "sub_questions": result["sub_questions"],
-                "total_context_words": question_context_length,
+                "total_context_sentences": question_context_length, # Note: this is the number of sentences
                 "llm_calls": question_llm_counter,
                 "processing_time": question_processing_time
             }
@@ -594,7 +648,7 @@ def chain_rag(dataset_name: str, use_cache: bool = True):
                 "question": question,
                 "expected_answer": expected_answer,
                 "error": str(e),
-                "llm_calls": llm_counter - initial_llm_counter,
+                "llm_calls": llm_counter - question_llm_counter_start,
                 "processing_time": question_processing_time
             }
             
@@ -608,8 +662,10 @@ def chain_rag(dataset_name: str, use_cache: bool = True):
         
         print("\n===== PROCESSING SUMMARY =====")
         print(f"Total questions processed: {total_questions}")
+        print(f"Total LLM calls: {llm_counter}")
+        print(f"Total context sentences: {context_length_total}")
         print(f"Average LLM calls per question: {avg_llm_calls:.2f}")
-        print(f"Average context length per question: {avg_context_length:.2f}")
+        print(f"Average context sentences per question: {avg_context_length:.2f}")
         print(f"Average processing time per question: {avg_processing_time:.2f} seconds")
         print("===============================")
 
@@ -640,3 +696,4 @@ if __name__ == "__main__":
         dataset_name=args.dataset,
         use_cache=not args.no_cache
     )
+
